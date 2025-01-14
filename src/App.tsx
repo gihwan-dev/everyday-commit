@@ -3,16 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertTitle } from '@/components/ui/alert';
 import { CheckCircle2, XCircle, Github, RefreshCw } from 'lucide-react';
+import { PARTICIPANTS } from "@/constants/participants.ts";
 
-const PARTICIPANTS = [
-    'gihwan-dev',
-    "Baek-Seungyeop",
-    "Byeolnabi",
-    "tlswl7479",
-    "vvalvvizal",
-    "yujini1121",
-    // 여기에 다른 참가자들의 GitHub 사용자명을 추가하세요
-] as const;
 
 interface CommitStatuses {
     [key: string]: boolean;
@@ -22,10 +14,21 @@ interface Errors {
     [key: string]: string;
 }
 
-interface GitHubEvent {
-    type: string;
-    created_at: string;
-}
+const query = `query($username: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $username) {
+    contributionsCollection(from: $from, to: $to) {
+      contributionCalendar {
+        totalContributions
+        weeks {
+          contributionDays {
+            contributionCount
+            date
+          }
+        }
+      }
+    }
+  }
+}`;
 
 const GitHubCommitChecker: React.FC = () => {
     const [commitStatuses, setCommitStatuses] = useState<CommitStatuses>({});
@@ -37,32 +40,58 @@ const GitHubCommitChecker: React.FC = () => {
         setErrors({});
         const newStatuses: CommitStatuses = {};
 
+        // 'ko-KR' 지역(KST) 기준으로 오늘 날짜 계산
+        const formatter = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul" });
+        const today = formatter.format(new Date()); // 오늘 날짜를 "YYYY-MM-DD" 형식으로 가져옴
+
+        const [year, month, day] = today
+            .split(". ")
+            .map((v) => v.replace(".", "").trim()); // "2023. 10. 31." -> ["2023", "10", "31"]
+
+        const from = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T00:00:00+09:00`; // KST 0시 시작
+        const to = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T23:59:59+09:00`; // KST 24시 끝
+
         for (const username of PARTICIPANTS) {
             try {
-                const response = await fetch(`https://api.github.com/users/${username}/events`, {
+                const response = await fetch('https://api.github.com/graphql', {
+                    method: 'POST',
                     headers: {
-                        'Authorization': `token ${import.meta.env.VITE_GITHUB_TOKEN}`,
-                        'Accept': 'application/vnd.github.v3+json'
-                    }
+                        'Authorization': `bearer ${import.meta.env.VITE_GITHUB_TOKEN}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query,
+                        variables: {
+                            username,
+                            from, // 오늘 KST 0시 시작
+                            to,   // 오늘 KST 24시 끝
+                        }
+                    })
                 });
 
                 if (!response.ok) {
-                    throw new Error(response.status === 404 ? '사용자를 찾을 수 없습니다.' : '데이터를 가져오는데 실패했습니다.');
+                    throw new Error('GitHub API 요청에 실패했습니다.');
                 }
 
-                const events: GitHubEvent[] = await response.json();
-                const today = new Date().toISOString().split('T')[0];
+                const data = await response.json();
 
-                const todayCommit = events.some(event => {
-                    if (event.type === 'PushEvent') {
-                        const eventDate = new Date(event.created_at).toISOString().split('T')[0];
-                        return eventDate === today;
-                    }
-                    return false;
-                });
+                if (data.errors) {
+                    throw new Error(data.errors[0].message);
+                }
 
-                newStatuses[username] = todayCommit;
+                const contributions = data.data?.user?.contributionsCollection?.contributionCalendar;
+                if (!contributions) {
+                    throw new Error('데이터를 찾을 수 없습니다.');
+                }
+
+                // 오늘의 커밋 수 확인
+                const todayContributions = contributions.weeks
+                    .flatMap(week => week.contributionDays)
+                    .find(day => day.date === from.split("T")[0]); // ISO 날짜만 비교
+
+                newStatuses[username] = todayContributions ? todayContributions.contributionCount > 0 : false;
             } catch (error) {
+                console.error('Error fetching data for', username, error);
                 setErrors(prev => ({
                     ...prev,
                     [username]: error instanceof Error ? error.message : '알 수 없는 에러가 발생했습니다.'
